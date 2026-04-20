@@ -43,6 +43,7 @@ def run_download(job_id, url, format_type):
         'yt-dlp',
         '--no-playlist',
         '--restrict-filenames',
+        '--extractor-args', 'youtube:player_client=web,android,ios',
         '-o', os.path.join(job_dir, '%(title)s.%(ext)s'),
     ]
 
