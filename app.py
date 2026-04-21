@@ -188,10 +188,61 @@ def get_file(job_id):
 @app.route('/extract-frames', methods=['POST'])
 def extract_frames():
     data = request.get_json(silent=True) or {}
+
+    # URL mode: extract specific frames from a remote URL via ffmpeg.
+    # Used by Supabase video-track-person (no prior yt-dlp job).
+    url = (data.get('url') or '').strip()
+    timestamps = data.get('timestamps')
+    if url and isinstance(timestamps, list) and len(timestamps) > 0:
+        quality = int(data.get('quality') or 80)
+        qscale = max(2, min(31, int(31 - (quality * 29 / 100))))  # 0–100 → 31–2
+        logger.info('Extracting %d frames from URL (quality=%d, qscale=%d)',
+                    len(timestamps), quality, qscale)
+
+        frames_b64 = []
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                for i, t in enumerate(timestamps):
+                    try:
+                        ts = float(t)
+                    except (TypeError, ValueError):
+                        continue
+                    frame_path = os.path.join(tmp_dir, 'frame_{:06d}.jpg'.format(i))
+                    # -ss BEFORE -i = fast input seek (keyframe-aligned).
+                    cmd = [
+                        'ffmpeg',
+                        '-hide_banner', '-loglevel', 'error',
+                        '-ss', str(ts),
+                        '-i', url,
+                        '-frames:v', '1',
+                        '-q:v', str(qscale),
+                        '-f', 'image2',
+                        frame_path,
+                        '-y',
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                    if result.returncode != 0:
+                        logger.warning('Frame at t=%.2fs failed: %s',
+                                       ts, result.stderr[-200:])
+                        continue
+                    if os.path.isfile(frame_path):
+                        with open(frame_path, 'rb') as fh:
+                            frames_b64.append(base64.b64encode(fh.read()).decode('utf-8'))
+
+            logger.info('Extracted %d/%d frames from URL', len(frames_b64), len(timestamps))
+            return jsonify({'frames': frames_b64})
+        except subprocess.TimeoutExpired:
+            logger.error('URL frame extraction timed out')
+            return jsonify({'error': 'Frame extraction timed out'}), 500
+        except Exception as exc:
+            logger.exception('URL-mode extract-frames failed')
+            return jsonify({'error': str(exc)}), 500
+
+    # job_id mode: reuse a file previously downloaded via /download.
     job_id = data.get('job_id', '').strip()
 
     if not job_id:
-        return jsonify({'error': 'job_id is required'}), 400
+        return jsonify({'error': 'job_id or url+timestamps is required'}), 400
 
     job = jobs.get(job_id)
     if not job:
