@@ -383,17 +383,7 @@ def extract_audio():
 
 @app.route('/trim', methods=['POST'])
 def trim():
-    """Trim + reframe a remote video using FFmpeg, return MP4.
-
-    Expected JSON body (sent by Supabase trim-video edge function):
-      url              - signed URL of the source video
-      start            - seconds from start
-      duration         - seconds of length
-      vf               - FFmpeg video filter string (crop/scale/pad already built)
-      mode             - "mp4" (only supported here for now)
-      padding_before   - seconds to extend the start
-      padding_after    - seconds to extend the end
-    """
+    """Trim + reframe a remote video using FFmpeg, return MP4."""
     data = request.get_json(silent=True) or {}
     url = (data.get('url') or '').strip()
     try:
@@ -414,15 +404,15 @@ def trim():
     actual_start = max(0.0, start - padding_before)
     actual_duration = duration + padding_before + padding_after
 
-    # Output file lives in the same DOWNLOAD_DIR, so cleanup_old_files
-    # reaps it after 1h automatically.
     out_dir = os.path.join(DOWNLOAD_DIR, 'trims', uuid.uuid4().hex[:12])
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, 'trimmed.mp4')
 
+    # No -loglevel; we want everything. ultrafast/CRF 26 are light on CPU+RAM
+    # so we don't get OOM-killed on Railway's smaller instances.
     cmd = [
         'ffmpeg',
-        '-hide_banner', '-loglevel', 'error',
+        '-hide_banner',
         '-ss', str(actual_start),
         '-i', url,
         '-t', str(actual_duration),
@@ -431,8 +421,8 @@ def trim():
         cmd += ['-vf', vf]
     cmd += [
         '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', '22',
+        '-preset', 'ultrafast',
+        '-crf', '26',
         '-pix_fmt', 'yuv420p',
         '-c:a', 'aac',
         '-b:a', '128k',
@@ -441,27 +431,35 @@ def trim():
         out_path,
     ]
 
-    logger.info('Trim: %.2fs +%.2fs from %s | vf=%s',
-                actual_start, actual_duration, url[:80], vf[:100])
+    logger.info('Trim starting: start=%.2f duration=%.2f url=%s', actual_start, actual_duration, url[:120])
+    logger.info('Trim vf (len=%d): %s', len(vf), vf[:500])
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        # bytes mode so weird ffmpeg output doesn't silently disappear
+        result = subprocess.run(cmd, capture_output=True, timeout=600)
+        stderr_text = result.stderr.decode('utf-8', errors='replace') if result.stderr else ''
+        stdout_text = result.stdout.decode('utf-8', errors='replace') if result.stdout else ''
+
         if result.returncode != 0:
-            err = result.stderr[-500:]
-            logger.error('Trim ffmpeg failed: %s', err)
-            return jsonify({'error': 'ffmpeg failed: ' + err[-200:]}), 500
+            # Negative returncode on POSIX = killed by signal (|returncode| = signal number)
+            signal_info = ''
+            if result.returncode < 0:
+                signal_info = f' (killed by signal {-result.returncode}, likely OOM or container restart)'
+            logger.error('Trim ffmpeg failed rc=%d%s stderr=%s stdout=%s',
+                         result.returncode, signal_info,
+                         stderr_text[-2000:] or '<empty>',
+                         stdout_text[-500:] or '<empty>')
+            return jsonify({
+                'error': f'ffmpeg failed (rc={result.returncode}){signal_info}',
+                'stderr': stderr_text[-500:],
+            }), 500
 
         if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
-            logger.error('Trim produced empty file')
-            return jsonify({'error': 'ffmpeg produced empty output'}), 500
+            logger.error('Trim produced empty file. stderr=%s', stderr_text[-1000:])
+            return jsonify({'error': 'ffmpeg produced empty output', 'stderr': stderr_text[-500:]}), 500
 
-        logger.info('Trim done: %d bytes', os.path.getsize(out_path))
-        return send_file(
-            out_path,
-            mimetype='video/mp4',
-            as_attachment=True,
-            download_name='trimmed.mp4',
-        )
+        logger.info('Trim done: %d bytes (stderr lines=%d)', os.path.getsize(out_path), stderr_text.count('\n'))
+        return send_file(out_path, mimetype='video/mp4', as_attachment=True, download_name='trimmed.mp4')
     except subprocess.TimeoutExpired:
         logger.error('Trim timed out after 10 min')
         return jsonify({'error': 'Trim timed out (10 min limit)'}), 500
