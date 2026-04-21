@@ -189,80 +189,126 @@ def get_file(job_id):
 def extract_frames():
     data = request.get_json(silent=True) or {}
 
-    # URL mode: extract specific frames from a remote URL via ffmpeg.
-    # Used by Supabase video-track-person (no prior yt-dlp job).
     url = (data.get('url') or '').strip()
     timestamps = data.get('timestamps')
     if url and isinstance(timestamps, list) and len(timestamps) > 0:
-        quality = int(data.get('quality') or 80)
-        qscale = max(2, min(31, int(31 - (quality * 29 / 100))))  # 0–100 → 31–2
-        logger.info('Extracting %d frames from URL (quality=%d, qscale=%d)',
-                    len(timestamps), quality, qscale)
+        try:
+            ts_list = sorted([float(t) for t in timestamps])
+        except (TypeError, ValueError):
+            return jsonify({'error': 'timestamps must be numbers'}), 400
 
-        frames_b64 = []
+        if len(ts_list) == 0:
+            return jsonify({'frames': []})
+
+        quality = int(data.get('quality') or 80)
+        qscale = max(2, min(31, int(31 - (quality * 29 / 100))))
+
+        t_start = ts_list[0]
+        t_end = ts_list[-1]
+
+        # Detect evenly-spaced timestamps (video-track-person always sends these)
+        use_fps = False
+        avg_delta = 1.0
+        if len(ts_list) > 1:
+            deltas = [ts_list[i + 1] - ts_list[i] for i in range(len(ts_list) - 1)]
+            avg_delta = sum(deltas) / len(deltas)
+            if avg_delta > 0 and all(abs(d - avg_delta) < 0.15 for d in deltas):
+                use_fps = True
+
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
-                for i, t in enumerate(timestamps):
-                    try:
-                        ts = float(t)
-                    except (TypeError, ValueError):
-                        continue
-                    frame_path = os.path.join(tmp_dir, 'frame_{:06d}.jpg'.format(i))
-                    # -ss BEFORE -i = fast input seek (keyframe-aligned).
+                if use_fps:
+                    # FAST PATH: one ffmpeg call with fps filter
+                    fps_rate = 1.0 / avg_delta
+                    duration = (t_end - t_start) + avg_delta * 0.5
+                    output_pattern = os.path.join(tmp_dir, 'frame_%06d.jpg')
                     cmd = [
                         'ffmpeg',
                         '-hide_banner', '-loglevel', 'error',
-                        '-ss', str(ts),
+                        '-ss', str(t_start),
+                        '-i', url,
+                        '-t', str(duration),
+                        '-an',
+                        '-vf', f'fps={fps_rate:.6f},scale=640:-2',
+                        '-q:v', str(qscale),
+                        '-f', 'image2',
+                        output_pattern,
+                        '-y',
+                    ]
+                    logger.info(
+                        'Extracting %d frames in ONE call (fps=%.3f, duration=%.1fs)',
+                        len(ts_list), fps_rate, duration,
+                    )
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+                    if result.returncode == 0:
+                        frame_files = sorted(glob.glob(os.path.join(tmp_dir, 'frame_*.jpg')))
+                        frames_b64 = []
+                        for path in frame_files[:len(ts_list)]:
+                            with open(path, 'rb') as fh:
+                                frames_b64.append(base64.b64encode(fh.read()).decode('utf-8'))
+                        logger.info('Got %d/%d frames via single call', len(frames_b64), len(ts_list))
+                        return jsonify({'frames': frames_b64})
+                    else:
+                        logger.warning(
+                            'Single-call fps extraction failed (%s), falling back to per-frame',
+                            result.stderr[-300:],
+                        )
+
+                # FALLBACK: one ffmpeg call per timestamp
+                frames_b64 = []
+                for i, t in enumerate(ts_list):
+                    frame_path = os.path.join(tmp_dir, f'frame_{i:06d}.jpg')
+                    cmd = [
+                        'ffmpeg',
+                        '-hide_banner', '-loglevel', 'error',
+                        '-ss', str(t),
                         '-i', url,
                         '-frames:v', '1',
+                        '-an',
+                        '-vf', 'scale=640:-2',
                         '-q:v', str(qscale),
                         '-f', 'image2',
                         frame_path,
                         '-y',
                     ]
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                    try:
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                    except subprocess.TimeoutExpired:
+                        logger.warning('Frame at t=%.2fs timed out', t)
+                        continue
                     if result.returncode != 0:
-                        logger.warning('Frame at t=%.2fs failed: %s',
-                                       ts, result.stderr[-200:])
+                        logger.warning('Frame at t=%.2fs failed: %s', t, result.stderr[-200:])
                         continue
                     if os.path.isfile(frame_path):
                         with open(frame_path, 'rb') as fh:
                             frames_b64.append(base64.b64encode(fh.read()).decode('utf-8'))
+                logger.info('Per-frame fallback: got %d/%d', len(frames_b64), len(ts_list))
+                return jsonify({'frames': frames_b64})
 
-            logger.info('Extracted %d/%d frames from URL', len(frames_b64), len(timestamps))
-            return jsonify({'frames': frames_b64})
         except subprocess.TimeoutExpired:
-            logger.error('URL frame extraction timed out')
             return jsonify({'error': 'Frame extraction timed out'}), 500
         except Exception as exc:
             logger.exception('URL-mode extract-frames failed')
             return jsonify({'error': str(exc)}), 500
 
-    # job_id mode: reuse a file previously downloaded via /download.
+    # ---- job_id mode (unchanged, keeps YouTube flow working) ----
     job_id = data.get('job_id', '').strip()
-
     if not job_id:
         return jsonify({'error': 'job_id or url+timestamps is required'}), 400
-
     job = jobs.get(job_id)
     if not job:
         return jsonify({'error': 'Job not found'}), 404
-
     if job.get('status') != 'done':
         return jsonify({'error': 'Job is not complete (status: {})'.format(job.get('status'))}), 400
-
     video_path = job.get('filepath')
     if not video_path or not os.path.isfile(video_path):
         return jsonify({'error': 'Video file not available'}), 404
 
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            logger.info('Extracting frames for job %s from %s', job_id, video_path)
             frame_list = extract_frames_from_video(video_path, tmp_dir)
-
             if not frame_list:
                 return jsonify({'error': 'No frames extracted from video'}), 500
-
             frames_payload = []
             for timestamp, frame_path in frame_list:
                 try:
@@ -273,18 +319,12 @@ def extract_frames():
                         os.remove(frame_path)
                     except OSError:
                         pass
-
-        logger.info('Extracted %d frames for job %s', len(frames_payload), job_id)
         return jsonify({'status': 'success', 'frames': frames_payload})
-
     except RuntimeError as exc:
-        logger.error('Frame extraction failed for job %s: %s', job_id, exc)
         return jsonify({'error': 'Frame extraction failed: {}'.format(exc)}), 500
     except subprocess.TimeoutExpired:
-        logger.error('ffmpeg timed out for job %s', job_id)
         return jsonify({'error': 'Frame extraction timed out'}), 500
     except Exception as exc:
-        logger.exception('Unexpected error extracting frames for job %s', job_id)
         return jsonify({'error': 'Unexpected error: {}'.format(exc)}), 500
 
 
