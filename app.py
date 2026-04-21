@@ -422,11 +422,19 @@ def trim():
     cmd += [
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
+        '-tune', 'zerolatency',    # desabilita lookahead/B-frames
         '-crf', '26',
         '-pix_fmt', 'yuv420p',
+        # Cortar recursos do x264 que consomem RAM: 1 reference frame, sem
+        # B-frames, sem weighted prediction, sem motion estimation hex/umh,
+        # sem mbtree lookahead, sem trellis. Perde ~5-10% de eficiência de
+        # compressão mas usa ~1/4 da RAM de um preset normal.
+        '-x264-params', 'ref=1:bframes=0:weightp=0:me=dia:subme=1:no-mbtree=1:trellis=0:aq-mode=0',
+        '-threads', '1',            # single-thread — evita overhead de paralelismo
         '-c:a', 'aac',
         '-b:a', '128k',
         '-movflags', '+faststart',
+        '-max_muxing_queue_size', '1024',
         '-y',
         out_path,
     ]
