@@ -381,6 +381,95 @@ def extract_audio():
         return jsonify({'error': 'Unexpected error: {}'.format(exc)}), 500
 
 
+@app.route('/trim', methods=['POST'])
+def trim():
+    """Trim + reframe a remote video using FFmpeg, return MP4.
+
+    Expected JSON body (sent by Supabase trim-video edge function):
+      url              - signed URL of the source video
+      start            - seconds from start
+      duration         - seconds of length
+      vf               - FFmpeg video filter string (crop/scale/pad already built)
+      mode             - "mp4" (only supported here for now)
+      padding_before   - seconds to extend the start
+      padding_after    - seconds to extend the end
+    """
+    data = request.get_json(silent=True) or {}
+    url = (data.get('url') or '').strip()
+    try:
+        start = float(data.get('start') or 0)
+        duration = float(data.get('duration') or 0)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'start and duration must be numbers'}), 400
+
+    vf = (data.get('vf') or '').strip()
+    padding_before = float(data.get('padding_before') or 0)
+    padding_after = float(data.get('padding_after') or 0)
+
+    if not url:
+        return jsonify({'error': 'url is required'}), 400
+    if duration <= 0:
+        return jsonify({'error': 'duration must be > 0'}), 400
+
+    actual_start = max(0.0, start - padding_before)
+    actual_duration = duration + padding_before + padding_after
+
+    # Output file lives in the same DOWNLOAD_DIR, so cleanup_old_files
+    # reaps it after 1h automatically.
+    out_dir = os.path.join(DOWNLOAD_DIR, 'trims', uuid.uuid4().hex[:12])
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, 'trimmed.mp4')
+
+    cmd = [
+        'ffmpeg',
+        '-hide_banner', '-loglevel', 'error',
+        '-ss', str(actual_start),
+        '-i', url,
+        '-t', str(actual_duration),
+    ]
+    if vf:
+        cmd += ['-vf', vf]
+    cmd += [
+        '-c:v', 'libx264',
+        '-preset', 'fast',
+        '-crf', '22',
+        '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        '-movflags', '+faststart',
+        '-y',
+        out_path,
+    ]
+
+    logger.info('Trim: %.2fs +%.2fs from %s | vf=%s',
+                actual_start, actual_duration, url[:80], vf[:100])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            err = result.stderr[-500:]
+            logger.error('Trim ffmpeg failed: %s', err)
+            return jsonify({'error': 'ffmpeg failed: ' + err[-200:]}), 500
+
+        if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+            logger.error('Trim produced empty file')
+            return jsonify({'error': 'ffmpeg produced empty output'}), 500
+
+        logger.info('Trim done: %d bytes', os.path.getsize(out_path))
+        return send_file(
+            out_path,
+            mimetype='video/mp4',
+            as_attachment=True,
+            download_name='trimmed.mp4',
+        )
+    except subprocess.TimeoutExpired:
+        logger.error('Trim timed out after 10 min')
+        return jsonify({'error': 'Trim timed out (10 min limit)'}), 500
+    except Exception as exc:
+        logger.exception('Trim failed unexpectedly')
+        return jsonify({'error': str(exc)}), 500
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
