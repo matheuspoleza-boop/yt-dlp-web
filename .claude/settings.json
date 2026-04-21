@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -w \"\\\\n[HTTP %{http_code}]\\\\n\" https://yt-dlp-web-production-015d.up.railway.app/health)"
+    ]
+  }
+}

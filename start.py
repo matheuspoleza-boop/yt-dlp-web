@@ -8,7 +8,8 @@ def main():
         'gunicorn',
         '--bind', f'0.0.0.0:{port}',
         '--timeout', '300',
-        '--workers', '2',
+        '--workers', '1',
+        '--threads', '4',
         'app:app',
     ]
     os.execvp('gunicorn', args)
