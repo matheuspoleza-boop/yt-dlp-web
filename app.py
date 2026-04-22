@@ -423,12 +423,7 @@ def extract_audio():
 
 @app.route('/trim', methods=['POST'])
 def trim():
-    """Trim + reframe a remote video using FFmpeg, return MP4.
-
-    Accepts subtitle_url: signed URL of an .ass file. If present, the file
-    is downloaded to a temp path and burned into the output via the
-    `subtitles=<file>` filter appended to the existing vf chain.
-    """
+    """Trim + reframe a remote video, STREAM the MP4 bytes straight back."""
     import urllib.request
 
     data = request.get_json(silent=True) or {}
@@ -453,18 +448,13 @@ def trim():
     actual_start = max(0.0, start - padding_before)
     actual_duration = duration + padding_before + padding_after
 
-    out_dir = os.path.join(DOWNLOAD_DIR, 'trims', uuid.uuid4().hex[:12])
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, 'trimmed.mp4')
+    tmp_dir = os.path.join(DOWNLOAD_DIR, 'trims', uuid.uuid4().hex[:12])
+    os.makedirs(tmp_dir, exist_ok=True)
     ass_path = None
 
-    # If the caller asked for subtitle burn-in, fetch the ASS file locally
-    # and append a `subtitles=` filter to the vf chain. The filter must be
-    # last so it runs AFTER crop/scale — positions and font sizes in the ASS
-    # are relative to the output frame, not the source.
     if subtitle_url:
         try:
-            ass_path = os.path.join(out_dir, 'subs.ass')
+            ass_path = os.path.join(tmp_dir, 'subs.ass')
             logger.info('Downloading subtitles (style=%s) from %s', subtitle_style, subtitle_url[:120])
             with urllib.request.urlopen(subtitle_url, timeout=30) as resp:
                 with open(ass_path, 'wb') as fh:
@@ -475,9 +465,6 @@ def trim():
                 logger.warning('Subtitle file is empty — skipping burn-in')
                 ass_path = None
             else:
-                # FFmpeg's subtitles filter path escaping: backslash the colons
-                # (Windows drive style) and escape single quotes. Our path is a
-                # plain Linux /tmp path so only the colon escape matters.
                 escaped = ass_path.replace('\\', '/').replace(':', '\\:').replace("'", "\\'")
                 subs_filter = f"subtitles='{escaped}'"
                 vf = f"{vf},{subs_filter}" if vf else subs_filter
@@ -504,47 +491,64 @@ def trim():
         '-threads', '1',
         '-c:a', 'aac',
         '-b:a', '128k',
-        '-movflags', '+faststart',
+        '-movflags', '+frag_keyframe+empty_moov+default_base_moof',
+        '-f', 'mp4',
         '-max_muxing_queue_size', '1024',
-        '-y',
-        out_path,
+        'pipe:1',
     ]
 
-    logger.info('Trim starting: start=%.2f duration=%.2f url=%s', actual_start, actual_duration, url[:120])
-    logger.info('Trim vf (len=%d): %s', len(vf), vf[:500])
+    logger.info('Streaming trim: start=%.2f duration=%.2f url=%s', actual_start, actual_duration, url[:120])
+    logger.info('Streaming trim vf (len=%d): %s', len(vf), vf[:400])
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, timeout=600)
-        stderr_text = result.stderr.decode('utf-8', errors='replace') if result.stderr else ''
-        stdout_text = result.stdout.decode('utf-8', errors='replace') if result.stdout else ''
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        if result.returncode != 0:
-            signal_info = ''
-            if result.returncode < 0:
-                signal_info = f' (killed by signal {-result.returncode}, likely OOM or container restart)'
-            logger.error('Trim ffmpeg failed rc=%d%s stderr=%s stdout=%s',
-                         result.returncode, signal_info,
-                         stderr_text[-2000:] or '<empty>',
-                         stdout_text[-500:] or '<empty>')
-            return jsonify({
-                'error': f'ffmpeg failed (rc={result.returncode}){signal_info}',
-                'stderr': stderr_text[-500:],
-            }), 500
+    def generate():
+        bytes_sent = 0
+        try:
+            while True:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break
+                bytes_sent += len(chunk)
+                yield chunk
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            if proc.returncode and proc.returncode != 0:
+                err = proc.stderr.read().decode('utf-8', errors='replace')[:500]
+                logger.error('Streaming trim ffmpeg rc=%d stderr=%s', proc.returncode, err or '<empty>')
+            else:
+                logger.info('Streaming trim done: %d bytes sent', bytes_sent)
+        except Exception as exc:
+            logger.exception('Streaming generator error: %s', exc)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            if ass_path and os.path.isfile(ass_path):
+                try:
+                    os.remove(ass_path)
+                except OSError:
+                    pass
+            try:
+                if os.path.isdir(tmp_dir) and not os.listdir(tmp_dir):
+                    os.rmdir(tmp_dir)
+            except OSError:
+                pass
 
-        if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
-            logger.error('Trim produced empty file. stderr=%s', stderr_text[-1000:])
-            return jsonify({'error': 'ffmpeg produced empty output', 'stderr': stderr_text[-500:]}), 500
-
-        logger.info('Trim done: %d bytes (stderr lines=%d, subs=%s)',
-                    os.path.getsize(out_path), stderr_text.count('\n'),
-                    'yes' if ass_path else 'no')
-        return send_file(out_path, mimetype='video/mp4', as_attachment=True, download_name='trimmed.mp4')
-    except subprocess.TimeoutExpired:
-        logger.error('Trim timed out after 10 min')
-        return jsonify({'error': 'Trim timed out (10 min limit)'}), 500
-    except Exception as exc:
-        logger.exception('Trim failed unexpectedly')
-        return jsonify({'error': str(exc)}), 500
+    return Response(
+        generate(),
+        mimetype='video/mp4',
+        headers={
+            'Content-Disposition': 'attachment; filename="trimmed.mp4"',
+            'Cache-Control': 'no-store',
+            'X-Accel-Buffering': 'no',
+        },
+    )
 
 
 if __name__ == '__main__':
