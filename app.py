@@ -3,6 +3,7 @@ import glob
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -21,8 +22,65 @@ CORS(app)
 DOWNLOAD_DIR = '/tmp/downloads'
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Track download jobs: {job_id: {status, filepath, filename, error}}
-jobs = {}
+# Download jobs live in SQLite so all gunicorn workers see the same state.
+# In-memory dicts are per-worker, so a /download on worker A is invisible
+# to /status on worker B; a single file on /tmp fixes that.
+JOBS_DB_PATH = '/tmp/jobs.db'
+
+
+def _jobs_db():
+    conn = sqlite3.connect(JOBS_DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_jobs_db():
+    conn = _jobs_db()
+    try:
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                filepath TEXT,
+                filename TEXT,
+                error TEXT,
+                created_at REAL DEFAULT (strftime('%s','now'))
+            )
+        ''')
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_init_jobs_db()
+
+
+def set_job(job_id, status, filepath=None, filename=None, error=None):
+    conn = _jobs_db()
+    try:
+        conn.execute(
+            'INSERT OR REPLACE INTO jobs (id, status, filepath, filename, error) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (job_id, status, filepath, filename, error),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_job(job_id):
+    conn = _jobs_db()
+    try:
+        row = conn.execute(
+            'SELECT status, filepath, filename, error FROM jobs WHERE id = ?',
+            (job_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {k: row[k] for k in ('status', 'filepath', 'filename', 'error') if row[k] is not None}
 
 
 def cleanup_old_files():
@@ -66,22 +124,19 @@ def run_download(job_id, url, format_type):
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
-            jobs[job_id] = {'status': 'error', 'error': result.stderr[-500:]}
+            set_job(job_id, status='error', error=result.stderr[-500:])
             return
 
         files = glob.glob(os.path.join(job_dir, '*'))
         if files:
-            jobs[job_id] = {
-                'status': 'done',
-                'filepath': files[0],
-                'filename': os.path.basename(files[0]),
-            }
+            set_job(job_id, status='done', filepath=files[0],
+                    filename=os.path.basename(files[0]))
         else:
-            jobs[job_id] = {'status': 'error', 'error': 'Nenhum arquivo gerado.'}
+            set_job(job_id, status='error', error='Nenhum arquivo gerado.')
     except subprocess.TimeoutExpired:
-        jobs[job_id] = {'status': 'error', 'error': 'Download excedeu o tempo limite (5 min).'}
+        set_job(job_id, status='error', error='Download excedeu o tempo limite (5 min).')
     except Exception as e:
-        jobs[job_id] = {'status': 'error', 'error': str(e)}
+        set_job(job_id, status='error', error=str(e))
 
 
 def extract_frames_from_video(video_path, output_dir):
@@ -159,7 +214,7 @@ def download():
         return jsonify({'error': 'Apenas URLs do YouTube sao aceitas.'}), 400
 
     job_id = uuid.uuid4().hex[:12]
-    jobs[job_id] = {'status': 'downloading'}
+    set_job(job_id, status='downloading')
 
     thread = threading.Thread(target=run_download, args=(job_id, url, format_type))
     thread.start()
@@ -169,7 +224,7 @@ def download():
 
 @app.route('/status/<job_id>')
 def status(job_id):
-    job = jobs.get(job_id)
+    job = get_job(job_id)
     if not job:
         return jsonify({'error': 'Job nao encontrado'}), 404
 
@@ -179,10 +234,13 @@ def status(job_id):
 
 @app.route('/get/<job_id>')
 def get_file(job_id):
-    job = jobs.get(job_id)
+    job = get_job(job_id)
     if not job or job.get('status') != 'done':
         return jsonify({'error': 'Arquivo nao disponivel'}), 404
-    return send_file(job['filepath'], as_attachment=True, download_name=job['filename'])
+    filepath = job.get('filepath')
+    if not filepath or not os.path.isfile(filepath):
+        return jsonify({'error': 'Arquivo nao disponivel'}), 404
+    return send_file(filepath, as_attachment=True, download_name=job['filename'])
 
 
 @app.route('/extract-frames', methods=['POST'])
@@ -295,7 +353,7 @@ def extract_frames():
     job_id = data.get('job_id', '').strip()
     if not job_id:
         return jsonify({'error': 'job_id or url+timestamps is required'}), 400
-    job = jobs.get(job_id)
+    job = get_job(job_id)
     if not job:
         return jsonify({'error': 'Job not found'}), 404
     if job.get('status') != 'done':
@@ -381,7 +439,7 @@ def extract_audio():
     if not job_id:
         return jsonify({'error': 'job_id or url is required'}), 400
 
-    job = jobs.get(job_id)
+    job = get_job(job_id)
     if not job:
         return jsonify({'error': 'Job not found'}), 404
 
