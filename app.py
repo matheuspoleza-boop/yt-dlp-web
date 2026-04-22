@@ -423,7 +423,7 @@ def extract_audio():
 
 @app.route('/trim', methods=['POST'])
 def trim():
-    """Trim + reframe a remote video, STREAM the MP4 bytes straight back."""
+    """Trim + reframe a remote video using FFmpeg, return MP4 (sync)."""
     import urllib.request
 
     data = request.get_json(silent=True) or {}
@@ -448,21 +448,19 @@ def trim():
     actual_start = max(0.0, start - padding_before)
     actual_duration = duration + padding_before + padding_after
 
-    tmp_dir = os.path.join(DOWNLOAD_DIR, 'trims', uuid.uuid4().hex[:12])
-    os.makedirs(tmp_dir, exist_ok=True)
+    out_dir = os.path.join(DOWNLOAD_DIR, 'trims', uuid.uuid4().hex[:12])
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, 'trimmed.mp4')
     ass_path = None
 
     if subtitle_url:
         try:
-            ass_path = os.path.join(tmp_dir, 'subs.ass')
+            ass_path = os.path.join(out_dir, 'subs.ass')
             logger.info('Downloading subtitles (style=%s) from %s', subtitle_style, subtitle_url[:120])
             with urllib.request.urlopen(subtitle_url, timeout=30) as resp:
                 with open(ass_path, 'wb') as fh:
                     fh.write(resp.read())
-            size = os.path.getsize(ass_path)
-            logger.info('Subtitles saved: %d bytes', size)
-            if size == 0:
-                logger.warning('Subtitle file is empty — skipping burn-in')
+            if os.path.getsize(ass_path) == 0:
                 ass_path = None
             else:
                 escaped = ass_path.replace('\\', '/').replace(':', '\\:').replace("'", "\\'")
@@ -491,64 +489,41 @@ def trim():
         '-threads', '1',
         '-c:a', 'aac',
         '-b:a', '128k',
-        '-movflags', '+frag_keyframe+empty_moov+default_base_moof',
-        '-f', 'mp4',
+        '-movflags', '+faststart',
         '-max_muxing_queue_size', '1024',
-        'pipe:1',
+        '-y',
+        out_path,
     ]
 
-    logger.info('Streaming trim: start=%.2f duration=%.2f url=%s', actual_start, actual_duration, url[:120])
-    logger.info('Streaming trim vf (len=%d): %s', len(vf), vf[:400])
+    logger.info('Sync trim: start=%.2f duration=%.2f url=%s', actual_start, actual_duration, url[:120])
+    logger.info('Sync trim vf (len=%d): %s', len(vf), vf[:400])
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=600)
+        stderr_text = result.stderr.decode('utf-8', errors='replace') if result.stderr else ''
 
-    def generate():
-        bytes_sent = 0
-        try:
-            while True:
-                chunk = proc.stdout.read(65536)
-                if not chunk:
-                    break
-                bytes_sent += len(chunk)
-                yield chunk
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                pass
-            if proc.returncode and proc.returncode != 0:
-                err = proc.stderr.read().decode('utf-8', errors='replace')[:500]
-                logger.error('Streaming trim ffmpeg rc=%d stderr=%s', proc.returncode, err or '<empty>')
-            else:
-                logger.info('Streaming trim done: %d bytes sent', bytes_sent)
-        except Exception as exc:
-            logger.exception('Streaming generator error: %s', exc)
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
-            if ass_path and os.path.isfile(ass_path):
-                try:
-                    os.remove(ass_path)
-                except OSError:
-                    pass
-            try:
-                if os.path.isdir(tmp_dir) and not os.listdir(tmp_dir):
-                    os.rmdir(tmp_dir)
-            except OSError:
-                pass
+        if result.returncode != 0:
+            signal_info = ''
+            if result.returncode < 0:
+                signal_info = f' (killed by signal {-result.returncode}, likely OOM)'
+            logger.error('Sync trim failed rc=%d%s stderr=%s', result.returncode, signal_info, stderr_text[-2000:])
+            return jsonify({
+                'error': f'ffmpeg failed (rc={result.returncode}){signal_info}',
+                'stderr': stderr_text[-500:],
+            }), 500
 
-    return Response(
-        generate(),
-        mimetype='video/mp4',
-        headers={
-            'Content-Disposition': 'attachment; filename="trimmed.mp4"',
-            'Cache-Control': 'no-store',
-            'X-Accel-Buffering': 'no',
-        },
-    )
+        if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+            logger.error('Sync trim empty output. stderr=%s', stderr_text[-1000:])
+            return jsonify({'error': 'ffmpeg produced empty output'}), 500
+
+        size_mb = os.path.getsize(out_path) / 1024 / 1024
+        logger.info('Sync trim done: %.1f MB', size_mb)
+        return send_file(out_path, mimetype='video/mp4', as_attachment=True, download_name='trimmed.mp4')
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Trim timed out (10 min limit)'}), 500
+    except Exception as exc:
+        logger.exception('Sync trim failed unexpectedly')
+        return jsonify({'error': str(exc)}), 500
 
 
 if __name__ == '__main__':
