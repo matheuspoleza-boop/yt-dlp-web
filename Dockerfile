@@ -38,7 +38,7 @@ RUN mkdir -p /usr/share/fonts/truetype/app && \
       curl -fsSL "$BASE/ofl/bebasneue/BebasNeue-Regular.ttf"                -o BebasNeue-Regular.ttf    || echo "[WARN] BebasNeue"; \
       curl -fsSL "$BASE/ofl/anton/Anton-Regular.ttf"                        -o Anton-Regular.ttf        || echo "[WARN] Anton"; \
       curl -fsSL "$BASE/ofl/bangers/Bangers-Regular.ttf"                    -o Bangers-Regular.ttf      || echo "[WARN] Bangers"; \
-      curl -fsSL "$BASE/ofl/permanentmarker/PermanentMarker-Regular.ttf"    -o PermanentMarker-Regular.ttf || echo "[WARN] PermanentMarker"; \
+      curl -fsSL "$BASE/apache/permanentmarker/PermanentMarker-Regular.ttf" -o PermanentMarker-Regular.ttf || echo "[WARN] PermanentMarker"; \
       curl -fsSL "$BASE/ofl/lobster/Lobster-Regular.ttf"                    -o Lobster-Regular.ttf      || echo "[WARN] Lobster"; \
     ) && \
     echo "=== Fontes instaladas: ===" && \
