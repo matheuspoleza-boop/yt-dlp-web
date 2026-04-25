@@ -36,6 +36,21 @@ BGUTIL_POT_BASE_URL = os.environ.get(
 )
 logger.info('bgutil POT provider base URL: %s', BGUTIL_POT_BASE_URL)
 
+# YouTube cookies file. If present at this path, yt-dlp uses it to bypass
+# the "Sign in to confirm you're not a bot" check that fires on Railway's
+# datacenter IPs. Each user-remixer must provide their own cookies.txt
+# (extracted from a disposable YouTube account in their browser). bgutil
+# remains as defense-in-depth — both can run in parallel.
+COOKIES_PATH = os.environ.get('YTDLP_COOKIES_PATH', '/app/cookies.txt')
+if os.path.isfile(COOKIES_PATH):
+    logger.info('YouTube cookies file found at %s', COOKIES_PATH)
+else:
+    logger.info(
+        'YouTube cookies file NOT found at %s — downloads will likely '
+        'fail with bot check. See README for setup.',
+        COOKIES_PATH,
+    )
+
 
 def _jobs_db():
     conn = sqlite3.connect(JOBS_DB_PATH, timeout=10)
@@ -115,7 +130,6 @@ def run_download(job_id, url, format_type):
 
     cmd = [
         'yt-dlp',
-        '-v',  # DIAGNÓSTICO TEMPORÁRIO — remover junto do fix de PO token plumbing
         '--no-playlist',
         '--restrict-filenames',
         '-o', os.path.join(job_dir, '%(title)s.%(ext)s'),
@@ -130,16 +144,13 @@ def run_download(job_id, url, format_type):
     cmd += ['--extractor-args', 'youtube:player_client=web']
     cmd += ['--extractor-args', f'youtubepot-bgutilhttp:base_url={BGUTIL_POT_BASE_URL}']
 
+    if os.path.isfile(COOKIES_PATH):
+        cmd += ['--cookies', COOKIES_PATH]
+
     cmd.append(url)
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        # DIAGNÓSTICO TEMPORÁRIO: log full stderr (yt-dlp -v output) so we can
-        # inspect [pot]/Extractor args/Player URL lines. Truncating to last 500
-        # chars on error would lose the early diagnostic lines we need.
-        if result.stderr:
-            logger.info('yt-dlp stderr (job=%s, rc=%d):\n%s',
-                        job_id, result.returncode, result.stderr)
         if result.returncode != 0:
             set_job(job_id, status='error', error=result.stderr[-500:])
             return
