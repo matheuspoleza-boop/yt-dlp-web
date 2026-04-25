@@ -126,7 +126,7 @@ def run_download(job_id, url, format_type):
         cmd += ['-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
                 '--merge-output-format', 'mp4']
 
-    cmd += ['--extractor-args', 'youtube:player_client=tv_embedded,mweb,ios']
+    cmd += ['--extractor-args', 'youtube:player_client=web']
     cmd += ['--extractor-args', f'youtubepot-bgutilhttp:base_url={BGUTIL_POT_BASE_URL}']
 
     cmd.append(url)
