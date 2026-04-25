@@ -42,6 +42,30 @@ logger.info('bgutil POT provider base URL: %s', BGUTIL_POT_BASE_URL)
 # (extracted from a disposable YouTube account in their browser). bgutil
 # remains as defense-in-depth — both can run in parallel.
 COOKIES_PATH = os.environ.get('YTDLP_COOKIES_PATH', '/app/cookies.txt')
+
+# Convenience for Railway-style deploys without shell access: if the
+# cookies file content is provided base64-encoded in YTDLP_COOKIES_BASE64,
+# decode it to COOKIES_PATH at startup. Lets the user-remixer paste the
+# base64 string into the Railway dashboard's Variables panel instead of
+# mounting a volume and uploading the file via CLI. Decode failures are
+# logged but non-fatal — the worker still boots.
+_cookies_b64 = os.environ.get('YTDLP_COOKIES_BASE64', '').strip()
+if _cookies_b64:
+    try:
+        _decoded = base64.b64decode(_cookies_b64)
+        _parent = os.path.dirname(COOKIES_PATH)
+        if _parent:
+            os.makedirs(_parent, exist_ok=True)
+        with open(COOKIES_PATH, 'wb') as _fh:
+            _fh.write(_decoded)
+        os.chmod(COOKIES_PATH, 0o600)
+        logger.info(
+            'YouTube cookies decoded from YTDLP_COOKIES_BASE64 to %s (%d bytes)',
+            COOKIES_PATH, len(_decoded),
+        )
+    except Exception as _exc:
+        logger.error('Failed to decode YTDLP_COOKIES_BASE64: %s', _exc)
+
 if os.path.isfile(COOKIES_PATH):
     logger.info('YouTube cookies file found at %s', COOKIES_PATH)
 else:
