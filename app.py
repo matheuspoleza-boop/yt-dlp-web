@@ -115,6 +115,7 @@ def run_download(job_id, url, format_type):
 
     cmd = [
         'yt-dlp',
+        '-v',  # DIAGNÓSTICO TEMPORÁRIO — remover junto do fix de PO token plumbing
         '--no-playlist',
         '--restrict-filenames',
         '-o', os.path.join(job_dir, '%(title)s.%(ext)s'),
@@ -133,6 +134,12 @@ def run_download(job_id, url, format_type):
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        # DIAGNÓSTICO TEMPORÁRIO: log full stderr (yt-dlp -v output) so we can
+        # inspect [pot]/Extractor args/Player URL lines. Truncating to last 500
+        # chars on error would lose the early diagnostic lines we need.
+        if result.stderr:
+            logger.info('yt-dlp stderr (job=%s, rc=%d):\n%s',
+                        job_id, result.returncode, result.stderr)
         if result.returncode != 0:
             set_job(job_id, status='error', error=result.stderr[-500:])
             return
