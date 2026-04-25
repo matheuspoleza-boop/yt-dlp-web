@@ -61,7 +61,22 @@ def _jobs_db():
 def _init_jobs_db():
     conn = _jobs_db()
     try:
-        conn.execute('PRAGMA journal_mode=WAL')
+        # Switching journal_mode to WAL needs an exclusive DB lock. With
+        # 4 gunicorn workers calling _init_jobs_db concurrently on boot,
+        # all but one race losers get "database is locked" and the worker
+        # dies, which crashes the master and triggers a full gunicorn
+        # restart. WAL is persistent across connections, so the winner's
+        # change sticks for everyone — losing the race is harmless and
+        # we tolerate it explicitly. CREATE TABLE IF NOT EXISTS is
+        # concurrency-safe and stays outside this guard.
+        try:
+            conn.execute('PRAGMA journal_mode=WAL')
+        except sqlite3.OperationalError as exc:
+            logger.warning(
+                'pid=%d journal_mode=WAL race during init (%s); continuing — '
+                'another worker is converting the DB',
+                os.getpid(), exc,
+            )
         conn.execute('''
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
