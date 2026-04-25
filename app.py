@@ -27,6 +27,15 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # to /status on worker B; a single file on /tmp fixes that.
 JOBS_DB_PATH = '/tmp/jobs.db'
 
+# bgutil-ytdlp-pot-provider sidecar. Override via Railway env var if the
+# sidecar service is renamed; default matches the service name agreed for
+# this project's Railway setup.
+BGUTIL_POT_BASE_URL = os.environ.get(
+    'BGUTIL_POT_BASE_URL',
+    'http://bgutil-pot-provider.railway.internal:4416',
+)
+logger.info('bgutil POT provider base URL: %s', BGUTIL_POT_BASE_URL)
+
 
 def _jobs_db():
     conn = sqlite3.connect(JOBS_DB_PATH, timeout=10)
@@ -118,6 +127,7 @@ def run_download(job_id, url, format_type):
                 '--merge-output-format', 'mp4']
 
     cmd += ['--extractor-args', 'youtube:player_client=tv_embedded,mweb,ios']
+    cmd += ['--extractor-args', f'youtubepot-bgutilhttp:base_url={BGUTIL_POT_BASE_URL}']
 
     cmd.append(url)
 
