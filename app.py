@@ -27,22 +27,6 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # to /status on worker B; a single file on /tmp fixes that.
 JOBS_DB_PATH = '/tmp/jobs.db'
 
-# DIAGNÓSTICO TEMPORÁRIO — confirma que `node` está no PATH do container
-# após o commit que adicionou nodejs ao apt install. Remover junto do fix
-# definitivo de n-sig challenge.
-try:
-    _node_v = subprocess.run(
-        ['node', '--version'], capture_output=True, text=True, timeout=5,
-    )
-    logger.info(
-        'Node runtime detected: %s',
-        _node_v.stdout.strip() or _node_v.stderr.strip() or '(empty output)',
-    )
-except FileNotFoundError:
-    logger.error('Node runtime NOT found on PATH — n-sig challenge will fail')
-except Exception as _exc:
-    logger.error('Node runtime check failed: %s', _exc)
-
 # bgutil-ytdlp-pot-provider sidecar. Override via Railway env var if the
 # sidecar service is renamed; default matches the service name agreed for
 # this project's Railway setup.
@@ -198,6 +182,7 @@ def run_download(job_id, url, format_type):
 
     cmd += ['--extractor-args', 'youtube:player_client=web']
     cmd += ['--extractor-args', f'youtubepot-bgutilhttp:base_url={BGUTIL_POT_BASE_URL}']
+    cmd += ['--js-runtimes', 'node']
 
     if os.path.isfile(COOKIES_PATH):
         cmd += ['--cookies', COOKIES_PATH]
