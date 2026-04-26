@@ -7,12 +7,16 @@ RUN apt-get update && \
 # Fontes base do sistema (sempre presentes em qualquer Debian).
 # fonts-liberation fornece Liberation Sans/Mono/Serif — substitutos
 # métricamente idênticos de Arial, Helvetica, Courier, Times. Libass usa.
+# nodejs é necessário para o yt-dlp resolver o n-signature JS challenge
+# do YouTube; yt-dlp auto-detecta `node` no PATH. Sem isso, /download
+# falha com "n challenge solving failed: Some formats may be missing".
 RUN apt-get update && apt-get install -y --no-install-recommends \
         fontconfig \
         fonts-liberation \
         fonts-dejavu-core \
         fonts-noto-core \
         curl \
+        nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Google Fonts baixadas do github.com/google/fonts.
