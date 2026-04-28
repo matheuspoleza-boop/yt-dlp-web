@@ -147,17 +147,36 @@ def get_job(job_id):
 
 
 def cleanup_old_files():
-    """Remove files older than 1 hour to save disk."""
+    """Remove files older than 1 hour to save disk.
+
+    Walks DOWNLOAD_DIR bottom-up so files are deleted before their
+    containing directory is rmdir'd. Tolerates the deeper layout of
+    /trim outputs (DOWNLOAD_DIR/trims/<uuid>/<file>) — the previous
+    glob-based version assumed depth 2 and crashed with
+    IsADirectoryError when it hit the trims/<uuid> level, killing
+    the daemon thread for the rest of the worker's lifetime. Each
+    iteration is fully wrapped so a single OS hiccup never stops
+    the loop again.
+    """
     while True:
-        time.sleep(300)
-        now = time.time()
-        for dirpath in glob.glob(os.path.join(DOWNLOAD_DIR, '*')):
-            if os.path.isdir(dirpath):
-                for f in glob.glob(os.path.join(dirpath, '*')):
-                    if now - os.path.getmtime(f) > 3600:
-                        os.remove(f)
-                if not os.listdir(dirpath):
-                    os.rmdir(dirpath)
+        try:
+            time.sleep(300)
+            now = time.time()
+            for root, _dirs, files in os.walk(DOWNLOAD_DIR, topdown=False):
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    try:
+                        if now - os.path.getmtime(fpath) > 3600:
+                            os.remove(fpath)
+                    except (FileNotFoundError, OSError) as exc:
+                        logger.debug('cleanup: skip file %s (%s)', fpath, exc)
+                if root != DOWNLOAD_DIR:
+                    try:
+                        os.rmdir(root)
+                    except OSError:
+                        pass
+        except Exception as exc:
+            logger.warning('cleanup_old_files iteration crashed: %s', exc)
 
 
 threading.Thread(target=cleanup_old_files, daemon=True).start()
