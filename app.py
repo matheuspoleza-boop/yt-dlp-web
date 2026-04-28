@@ -288,43 +288,6 @@ def health():
     return jsonify({'status': 'ok'})
 
 
-# DIAGNÓSTICO TEMPORÁRIO — auditoria das 17 famílias de fontes que o
-# frontend pede ao libass, pra detectar mismatches de family-name entre
-# o nome no FONT_MAP do frontend e o name embutido nos .ttf instalados.
-# Remover junto do fix definitivo de aliases/font names.
-@app.route('/debug/fonts')
-def debug_fonts():
-    families = [
-        'Arial', 'Georgia', 'Anton', 'Montserrat', 'Roboto', 'Poppins',
-        'Open Sans', 'Lato', 'Oswald', 'Raleway', 'Nunito',
-        'Playfair Display', 'Bebas Neue', 'Bangers', 'Permanent Marker',
-        'Lobster', 'Courier New',
-    ]
-    out = []
-    r = subprocess.run(['fc-list'], capture_output=True, text=True, timeout=10)
-    fc_lines = r.stdout.splitlines()
-    out.append(f'=== [1] fc-list total: {len(fc_lines)} ===')
-    out.append('')
-    out.append('=== [2] fc-list first 100 unique ===')
-    out.extend(sorted(set(fc_lines))[:100])
-    out.append('')
-    out.append('=== [3] fc-match for each family the frontend requests ===')
-    for fam in families:
-        m = subprocess.run(['fc-match', fam], capture_output=True, text=True, timeout=5)
-        out.append(f'{fam:22s} → {m.stdout.strip()}')
-    out.append('')
-    out.append('=== [4] fc-query /usr/share/fonts/truetype/app/*.ttf ===')
-    for path in sorted(glob.glob('/usr/share/fonts/truetype/app/*.ttf')):
-        out.append(f'--- {os.path.basename(path)} ---')
-        q = subprocess.run(['fc-query', path], capture_output=True, text=True, timeout=5)
-        for line in q.stdout.splitlines():
-            stripped = line.strip()
-            low = stripped.lower()
-            if low.startswith(('family:', 'fullname:', 'postscriptname:')):
-                out.append(stripped)
-    return '\n'.join(out), 200, {'Content-Type': 'text/plain; charset=utf-8'}
-
-
 @app.route('/download', methods=['POST'])
 def download():
     data = request.get_json(silent=True) or {}
