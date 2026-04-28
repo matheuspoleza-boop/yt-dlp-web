@@ -626,12 +626,10 @@ def trim():
         cmd += ['-vf', vf]
     cmd += [
         '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-tune', 'zerolatency',
-        '-crf', '26',
+        '-preset', 'fast',
+        '-crf', '22',
         '-pix_fmt', 'yuv420p',
-        '-x264-params', 'ref=1:bframes=0:weightp=0:me=dia:subme=1:no-mbtree=1:trellis=0:aq-mode=0',
-        '-threads', '1',
+        '-threads', '0',
         '-c:a', 'aac',
         '-b:a', '128k',
         '-movflags', '+faststart',
