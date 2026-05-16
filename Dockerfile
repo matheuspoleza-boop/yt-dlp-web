@@ -4,12 +4,12 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
-# Fontes base do sistema (sempre presentes em qualquer Debian).
-# fonts-liberation fornece Liberation Sans/Mono/Serif — substitutos
-# métricamente idênticos de Arial, Helvetica, Courier, Times. Libass usa.
-# nodejs é necessário para o yt-dlp resolver o n-signature JS challenge
-# do YouTube; yt-dlp auto-detecta `node` no PATH. Sem isso, /download
-# falha com "n challenge solving failed: Some formats may be missing".
+# Fuentes base del sistema (siempre presentes en cualquier Debian).
+# fonts-liberation provee Liberation Sans/Mono/Serif — sustitutos
+# métricamente idénticos de Arial, Helvetica, Courier, Times. Libass los usa.
+# nodejs es necesario para que yt-dlp resuelva el n-signature JS challenge
+# de YouTube; yt-dlp auto-detecta `node` en el PATH. Sin esto, /download
+# falla con "n challenge solving failed: Some formats may be missing".
 RUN apt-get update && apt-get install -y --no-install-recommends \
         fontconfig \
         fonts-liberation \
@@ -19,13 +19,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Google Fonts baixadas do github.com/google/fonts.
-# Cada curl roda isolado: se uma quebrar, as outras continuam.
-# URLs de fontes variáveis usam %5B/%5D (encoding de [ e ]).
+# Google Fonts descargadas desde github.com/google/fonts.
+# Cada curl corre aislado: si uno falla, los demás continúan.
+# Las URLs de fuentes variables usan %5B/%5D (encoding de [ y ]).
 RUN mkdir -p /usr/share/fonts/truetype/app && \
     cd /usr/share/fonts/truetype/app && \
     BASE="https://raw.githubusercontent.com/google/fonts/main" && \
-    echo "=== Baixando Google Fonts (failures são loggados, não matam build) ===" && \
+    echo "=== Descargando Google Fonts (los fallos se loguean, no matan el build) ===" && \
     ( \
       curl -fsSL "$BASE/ofl/montserrat/Montserrat%5Bwght%5D.ttf"            -o Montserrat.ttf           || echo "[WARN] Montserrat"; \
       curl -fsSL "$BASE/ofl/roboto/Roboto%5Bwdth,wght%5D.ttf"               -o Roboto.ttf               || echo "[WARN] Roboto"; \
@@ -45,7 +45,7 @@ RUN mkdir -p /usr/share/fonts/truetype/app && \
       curl -fsSL "$BASE/apache/permanentmarker/PermanentMarker-Regular.ttf" -o PermanentMarker-Regular.ttf || echo "[WARN] PermanentMarker"; \
       curl -fsSL "$BASE/ofl/lobster/Lobster-Regular.ttf"                    -o Lobster-Regular.ttf      || echo "[WARN] Lobster"; \
     ) && \
-    echo "=== Fontes instaladas: ===" && \
+    echo "=== Fuentes instaladas: ===" && \
     ls -la /usr/share/fonts/truetype/app/ && \
     fc-cache -fv
 

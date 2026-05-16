@@ -219,9 +219,9 @@ def run_download(job_id, url, format_type):
             set_job(job_id, status='done', filepath=files[0],
                     filename=os.path.basename(files[0]))
         else:
-            set_job(job_id, status='error', error='Nenhum arquivo gerado.')
+            set_job(job_id, status='error', error='No se generó ningún archivo.')
     except subprocess.TimeoutExpired:
-        set_job(job_id, status='error', error='Download excedeu o tempo limite (5 min).')
+        set_job(job_id, status='error', error='El download excedió el tiempo límite (5 min).')
     except Exception as e:
         set_job(job_id, status='error', error=str(e))
 
@@ -295,10 +295,10 @@ def download():
     format_type = data.get('format', 'video')
 
     if not url:
-        return jsonify({'error': 'URL obrigatoria'}), 400
+        return jsonify({'error': 'URL obligatoria'}), 400
 
     if not any(domain in url for domain in ['youtube.com', 'youtu.be']):
-        return jsonify({'error': 'Apenas URLs do YouTube sao aceitas.'}), 400
+        return jsonify({'error': 'Solo se aceptan URLs de YouTube.'}), 400
 
     job_id = uuid.uuid4().hex[:12]
     set_job(job_id, status='downloading')
@@ -313,7 +313,7 @@ def download():
 def status(job_id):
     job = get_job(job_id)
     if not job:
-        return jsonify({'error': 'Job nao encontrado'}), 404
+        return jsonify({'error': 'Job no encontrado'}), 404
 
     safe = {k: v for k, v in job.items() if k != 'filepath'}
     return jsonify(safe)
@@ -323,10 +323,10 @@ def status(job_id):
 def get_file(job_id):
     job = get_job(job_id)
     if not job or job.get('status') != 'done':
-        return jsonify({'error': 'Arquivo nao disponivel'}), 404
+        return jsonify({'error': 'Archivo no disponible'}), 404
     filepath = job.get('filepath')
     if not filepath or not os.path.isfile(filepath):
-        return jsonify({'error': 'Arquivo nao disponivel'}), 404
+        return jsonify({'error': 'Archivo no disponible'}), 404
     return send_file(filepath, as_attachment=True, download_name=job['filename'])
 
 
